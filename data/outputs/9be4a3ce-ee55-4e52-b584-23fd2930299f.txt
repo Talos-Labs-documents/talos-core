@@ -1,6 +1,0 @@
-TALOS executed plan for goal: summarize this project
-
-Steps:
-- Analyze the request
-- Break the goal into steps
-- Prepare for approval-gated execution
