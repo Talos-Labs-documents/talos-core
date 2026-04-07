@@ -6,6 +6,8 @@ from datetime import datetime
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from app.ollama_client import generate_plan_steps
+
 
 app = FastAPI(title="TALOS API", version="0.3-alpha")
 
@@ -87,16 +89,21 @@ def create_plan_data(goal: str):
         }
 
     plan_id = str(uuid4())
+    plan_steps = generate_plan_steps(goal)
+
+    fallback_steps = [
+        "Analyze the request",
+        "Break the goal into steps",
+        "Prepare for approval-gated execution",
+    ]
+
+    used_fallback = plan_steps == fallback_steps
 
     plan_data = {
         "plan_id": plan_id,
         "goal": goal,
-        "plan": [
-            "Analyze the request",
-            "Break the goal into steps",
-            "Prepare for approval-gated execution",
-        ],
-        "source": "fallback",
+        "plan": plan_steps,
+        "source": "fallback" if used_fallback else "ollama",
         "status": "draft",
         "approved": False,
         "result": None,
@@ -106,7 +113,14 @@ def create_plan_data(goal: str):
 
     PLAN_STORE[plan_id] = plan_data
     _save_plan(plan_data)
-    _save_log(plan_id, "plan_created", {"goal": goal})
+    _save_log(
+        plan_id,
+        "plan_created",
+        {
+            "goal": goal,
+            "source": plan_data["source"],
+        },
+    )
 
     return {
         "ok": True,
@@ -140,7 +154,14 @@ def approve_plan_data(plan_id: str, approved: bool):
 
     PLAN_STORE[plan_id] = plan
     _save_plan(plan)
-    _save_log(plan_id, "plan_approval_updated", {"approved": approved, "status": plan["status"]})
+    _save_log(
+        plan_id,
+        "plan_approval_updated",
+        {
+            "approved": approved,
+            "status": plan["status"],
+        },
+    )
 
     return {
         "ok": True,
@@ -192,6 +213,7 @@ def run_plan_data(plan_id: str):
 
     result_text = (
         f"TALOS executed plan for goal: {plan['goal']}\n\n"
+        f"Plan source: {plan['source']}\n\n"
         f"Steps:\n- " + "\n- ".join(plan["plan"])
     )
 
@@ -207,6 +229,7 @@ def run_plan_data(plan_id: str):
         "plan_completed",
         {
             "status": plan["status"],
+            "source": plan["source"],
             "output_file": str(_output_txt_path(plan_id)),
         },
     )
@@ -248,6 +271,7 @@ def capabilities():
             "plan_execution",
             "in_memory_plan_store",
             "disk_persistence",
+            "ollama_planning",
         ],
     }
 

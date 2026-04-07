@@ -38,6 +38,7 @@ Available commands:
                     print("\n[PLAN CREATED]")
                     print(f"Plan ID: {result['plan_id']}")
                     print(f"Goal: {result['goal']}")
+                    print(f"Source: {result['source']}")
                     print("Steps:")
                     for i, step in enumerate(result["plan"], 1):
                         print(f"  {i}. {step}")
@@ -56,6 +57,7 @@ Available commands:
                     print("\n[CURRENT PLAN]")
                     print(f"Plan ID: {result['plan_id']}")
                     print(f"Goal: {result['goal']}")
+                    print(f"Source: {result['source']}")
                     print("Steps:")
                     for i, step in enumerate(result["plan"], 1):
                         print(f"  {i}. {step}")

@@ -3,6 +3,11 @@
 - FastAPI backend (ready for expansion)
 
 ---
+# TALOS 0.3 Public Alpha
+
+TALOS is a local-first orchestration layer for approval-gated AI execution.
+
+It turns goals into structured plans, requires user approval before execution, and writes persistent outputs, plans, and logs to disk.
 
 ## Installation
 
