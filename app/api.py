@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from app.ollama_client import generate_plan_steps
-
+from app.executor import generate_repo_summary
 
 app = FastAPI(title="TALOS API", version="0.3-alpha")
 
@@ -211,11 +211,18 @@ def run_plan_data(plan_id: str):
             "error": "Plan must be approved before running",
         }
 
-    result_text = (
-        f"TALOS executed plan for goal: {plan['goal']}\n\n"
-        f"Plan source: {plan['source']}\n\n"
-        f"Steps:\n- " + "\n- ".join(plan["plan"])
-    )
+    goal_lower = plan["goal"].lower()
+
+    if any(word in goal_lower for word in ["repository", "repo", "summarize", "contributor", "review"]):
+        result_text = generate_repo_summary(".")
+        execution_mode = "repo_summary"
+    else:
+        result_text = (
+            f"TALOS executed plan for goal: {plan['goal']}\n\n"
+            f"Plan source: {plan['source']}\n\n"
+            f"Steps:\n- " + "\n- ".join(plan["plan"])
+        )
+        execution_mode = "fallback"
 
     plan["status"] = "completed"
     plan["result"] = result_text
@@ -230,6 +237,7 @@ def run_plan_data(plan_id: str):
         {
             "status": plan["status"],
             "source": plan["source"],
+            "execution_mode": execution_mode,
             "output_file": str(_output_txt_path(plan_id)),
         },
     )
@@ -237,6 +245,7 @@ def run_plan_data(plan_id: str):
     return {
         "ok": True,
         **plan,
+        "execution_mode": execution_mode,
         "output_file": str(_output_txt_path(plan_id)),
         "plan_file": str(_plan_json_path(plan_id)),
         "log_file": str(_log_json_path(plan_id)),
