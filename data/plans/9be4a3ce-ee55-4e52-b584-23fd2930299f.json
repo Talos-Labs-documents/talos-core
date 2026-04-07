@@ -1,0 +1,15 @@
+{
+  "plan_id": "9be4a3ce-ee55-4e52-b584-23fd2930299f",
+  "goal": "summarize this project",
+  "plan": [
+    "Analyze the request",
+    "Break the goal into steps",
+    "Prepare for approval-gated execution"
+  ],
+  "source": "fallback",
+  "status": "completed",
+  "approved": true,
+  "result": "TALOS executed plan for goal: summarize this project\n\nSteps:\n- Analyze the request\n- Break the goal into steps\n- Prepare for approval-gated execution",
+  "created_at": "2026-04-07T22:23:38.728868Z",
+  "updated_at": "2026-04-07T22:23:38.730310Z"
+}
