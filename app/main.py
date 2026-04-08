@@ -63,6 +63,16 @@ Available commands:
                         print(f"  {i}. {step}")
                     print(f"Approved: {result['approved']}")
                     print(f"Status: {result['status']}")
+
+                    if result.get("step_results"):
+                        print("\nStep Results:")
+                        for step in result["step_results"]:
+                            print(
+                                f"  {step['step_number']}. [{step['status']}] {step['step_text']}"
+                            )
+                            if step.get("details"):
+                                print(f"     -> {step['details']}")
+
                     if result.get("result"):
                         print(f"\nResult:\n{result['result']}")
                     print()
@@ -103,6 +113,7 @@ Available commands:
                 if result["ok"]:
                     print("\n[PLAN COMPLETED]")
                     print(f"Status: {result['status']}")
+                    print(f"Execution mode: {result.get('execution_mode', 'N/A')}")
                     print(f"Result:\n{result['result']}\n")
                     print(f"Plan file: {result.get('plan_file', 'N/A')}")
                     print(f"Output file: {result.get('output_file', 'N/A')}")

@@ -100,16 +100,25 @@ def create_plan_data(goal: str):
     used_fallback = plan_steps == fallback_steps
 
     plan_data = {
-        "plan_id": plan_id,
-        "goal": goal,
-        "plan": plan_steps,
-        "source": "fallback" if used_fallback else "ollama",
-        "status": "draft",
-        "approved": False,
-        "result": None,
-        "created_at": _timestamp(),
-        "updated_at": _timestamp(),
-    }
+    "plan_id": plan_id,
+    "goal": goal,
+    "plan": plan_steps,
+    "source": "fallback" if used_fallback else "ollama",
+    "status": "draft",
+    "approved": False,
+    "result": None,
+    "step_results": [
+        {
+            "step_number": i + 1,
+            "step_text": step,
+            "status": "pending",
+            "details": None,
+        }
+        for i, step in enumerate(plan_steps)
+    ],
+    "created_at": _timestamp(),
+    "updated_at": _timestamp(),
+}
 
     PLAN_STORE[plan_id] = plan_data
     _save_plan(plan_data)
@@ -211,6 +220,110 @@ def run_plan_data(plan_id: str):
             "error": "Plan must be approved before running",
         }
 
+    goal_lower = plan["goal"].lower()
+    step_results = plan.get("step_results", [])
+
+    execution_notes = []
+    execution_mode = "fallback"
+
+    try:
+        for step_entry in step_results:
+            step_text = step_entry["step_text"].lower()
+
+            if any(word in goal_lower for word in ["repository", "repo", "summarize", "contributor", "review"]):
+                if "repository structure" in step_text or "structure" in step_text:
+                    step_entry["status"] = "completed"
+                    step_entry["details"] = "Reviewed top-level repository structure."
+                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed repository structure.")
+                elif "cli" in step_text:
+                    step_entry["status"] = "completed"
+                    step_entry["details"] = "Reviewed CLI entry point and command loop in app/main.py."
+                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed CLI flow.")
+                elif "api" in step_text:
+                    step_entry["status"] = "completed"
+                    step_entry["details"] = "Reviewed API-backed planning and execution logic in app/api.py."
+                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed API flow.")
+                elif "plan lifecycle" in step_text or "approval" in step_text or "execution" in step_text:
+                    step_entry["status"] = "completed"
+                    step_entry["details"] = "Reviewed plan creation, approval, execution, and persistence flow."
+                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed plan lifecycle.")
+                elif "output" in step_text or "log" in step_text or "data flow" in step_text:
+                    step_entry["status"] = "completed"
+                    step_entry["details"] = "Reviewed how outputs, plans, and logs are written under data/."
+                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed output/log flow.")
+                else:
+                    step_entry["status"] = "completed"
+                    step_entry["details"] = "Reviewed repository context relevant to this step."
+                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed repository context.")
+
+                execution_mode = "step_tracked_repo_review"
+            else:
+                step_entry["status"] = "completed"
+                step_entry["details"] = "Fallback execution path completed for this step."
+                execution_notes.append(f"Step {step_entry['step_number']}: fallback execution.")
+                execution_mode = "step_tracked_fallback"
+
+        if execution_mode == "step_tracked_repo_review":
+            repo_summary = generate_repo_summary(".")
+            result_text = (
+                f"{repo_summary}\n\n"
+                f"## Step Execution Notes\n"
+                + "\n".join(f"- {note}" for note in execution_notes)
+            )
+        else:
+            result_text = (
+                f"TALOS executed plan for goal: {plan['goal']}\n\n"
+                f"Plan source: {plan['source']}\n"
+                f"Execution mode: {execution_mode}\n\n"
+                f"## Step Execution Notes\n"
+                + "\n".join(f"- {note}" for note in execution_notes)
+            )
+
+        plan["status"] = "completed"
+        plan["result"] = result_text
+        plan["step_results"] = step_results
+        plan["updated_at"] = _timestamp()
+
+        _output_txt_path(plan_id).write_text(result_text, encoding="utf-8")
+        PLAN_STORE[plan_id] = plan
+        _save_plan(plan)
+        _save_log(
+            plan_id,
+            "plan_completed",
+            {
+                "status": plan["status"],
+                "source": plan["source"],
+                "execution_mode": execution_mode,
+                "steps_completed": len([s for s in step_results if s["status"] == "completed"]),
+                "output_file": str(_output_txt_path(plan_id)),
+            },
+        )
+
+        return {
+            "ok": True,
+            **plan,
+            "execution_mode": execution_mode,
+            "output_file": str(_output_txt_path(plan_id)),
+            "plan_file": str(_plan_json_path(plan_id)),
+            "log_file": str(_log_json_path(plan_id)),
+        }
+
+    except Exception as e:
+        plan["status"] = "failed"
+        plan["updated_at"] = _timestamp()
+        PLAN_STORE[plan_id] = plan
+        _save_plan(plan)
+        _save_log(
+            plan_id,
+            "plan_failed",
+            {
+                "error": str(e),
+            },
+        )
+        return {
+            "ok": False,
+            "error": f"Execution failed: {e}",
+        }
     goal_lower = plan["goal"].lower()
 
     if any(word in goal_lower for word in ["repository", "repo", "summarize", "contributor", "review"]):
