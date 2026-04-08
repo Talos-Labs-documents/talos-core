@@ -7,8 +7,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from app.ollama_client import generate_plan_steps
-from app.executor import generate_repo_summary
-
+from app.executor import generate_repo_summary, execute_step
 app = FastAPI(title="TALOS API", version="0.3-alpha")
 
 PLAN_STORE = {}
@@ -220,50 +219,23 @@ def run_plan_data(plan_id: str):
             "error": "Plan must be approved before running",
         }
 
-    goal_lower = plan["goal"].lower()
     step_results = plan.get("step_results", [])
-
     execution_notes = []
-    execution_mode = "fallback"
+    execution_mode = "step_routed_execution"
 
     try:
         for step_entry in step_results:
-            step_text = step_entry["step_text"].lower()
+            result = execute_step(step_entry["step_text"], plan["goal"], repo_root=".")
 
-            if any(word in goal_lower for word in ["repository", "repo", "summarize", "contributor", "review"]):
-                if "repository structure" in step_text or "structure" in step_text:
-                    step_entry["status"] = "completed"
-                    step_entry["details"] = "Reviewed top-level repository structure."
-                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed repository structure.")
-                elif "cli" in step_text:
-                    step_entry["status"] = "completed"
-                    step_entry["details"] = "Reviewed CLI entry point and command loop in app/main.py."
-                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed CLI flow.")
-                elif "api" in step_text:
-                    step_entry["status"] = "completed"
-                    step_entry["details"] = "Reviewed API-backed planning and execution logic in app/api.py."
-                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed API flow.")
-                elif "plan lifecycle" in step_text or "approval" in step_text or "execution" in step_text:
-                    step_entry["status"] = "completed"
-                    step_entry["details"] = "Reviewed plan creation, approval, execution, and persistence flow."
-                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed plan lifecycle.")
-                elif "output" in step_text or "log" in step_text or "data flow" in step_text:
-                    step_entry["status"] = "completed"
-                    step_entry["details"] = "Reviewed how outputs, plans, and logs are written under data/."
-                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed output/log flow.")
-                else:
-                    step_entry["status"] = "completed"
-                    step_entry["details"] = "Reviewed repository context relevant to this step."
-                    execution_notes.append(f"Step {step_entry['step_number']}: reviewed repository context.")
+            step_entry["status"] = result["status"]
+            step_entry["details"] = result["details"]
+            step_entry["executor"] = result["executor"]
 
-                execution_mode = "step_tracked_repo_review"
-            else:
-                step_entry["status"] = "completed"
-                step_entry["details"] = "Fallback execution path completed for this step."
-                execution_notes.append(f"Step {step_entry['step_number']}: fallback execution.")
-                execution_mode = "step_tracked_fallback"
+            execution_notes.append(
+                f"Step {step_entry['step_number']} [{result['executor']}]: {result['details']}"
+            )
 
-        if execution_mode == "step_tracked_repo_review":
+        if any(word in plan["goal"].lower() for word in ["repository", "repo", "summarize", "contributor", "review"]):
             repo_summary = generate_repo_summary(".")
             result_text = (
                 f"{repo_summary}\n\n"

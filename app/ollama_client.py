@@ -16,7 +16,6 @@ def _extract_json_object(text: str):
     return match.group(0) if match else None
 
 
-# 🧠 PLANNER
 def generate_plan_steps(goal: str, model: str = DEFAULT_MODEL):
     prompt = f"""
 You are planning a safe, approval-gated execution plan for a local orchestration system called TALOS.
@@ -60,8 +59,8 @@ Rules:
         )
 
         content = response["message"]["content"].strip()
-
         json_text = _extract_json_object(content)
+
         if not json_text:
             return FALLBACK_STEPS
 
@@ -69,7 +68,9 @@ Rules:
         steps = data.get("steps", [])
 
         if isinstance(steps, list) and steps:
-            return steps
+            cleaned = [str(step).strip() for step in steps if str(step).strip()]
+            if cleaned:
+                return cleaned
 
     except Exception as e:
         print(f"[OLLAMA PLAN ERROR] {type(e).__name__}: {e}")
@@ -77,7 +78,6 @@ Rules:
     return FALLBACK_STEPS
 
 
-# 🧠 EXECUTION SUMMARY (LLM-powered)
 def generate_repo_explanation(context: str, model: str = DEFAULT_MODEL) -> str:
     prompt = f"""
 You are writing a contributor-facing repository summary for an early-alpha local orchestration system called TALOS.
@@ -106,11 +106,50 @@ Repository context:
         )
 
         content = response["message"]["content"].strip()
-
         if content:
             return content
 
     except Exception as e:
-        print(f"[OLLAMA SUMMARY ERROR] {type(e).__name__}: {e}")
+        print(f"[OLLAMA REPO SUMMARY ERROR] {type(e).__name__}: {e}")
+
+    return ""
+
+
+def generate_file_explanation(file_path: str, content: str, model: str = DEFAULT_MODEL) -> str:
+    prompt = f"""
+You are explaining a file inside an early-alpha local orchestration system called TALOS.
+
+Your job:
+- Explain what this file appears to do
+- Stay grounded ONLY in the provided file content
+- Do NOT invent functionality that is not visible in the file
+- Keep the explanation concise and contributor-friendly
+
+Return plain text only.
+
+Structure:
+1. One short overview paragraph
+2. A short bullet list of the most important responsibilities in this file
+3. One short sentence telling a contributor why this file matters
+
+File path:
+{file_path}
+
+File content:
+{content}
+"""
+
+    try:
+        response = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        content_out = response["message"]["content"].strip()
+        if content_out:
+            return content_out
+
+    except Exception as e:
+        print(f"[OLLAMA FILE SUMMARY ERROR] {type(e).__name__}: {e}")
 
     return ""

@@ -67,9 +67,12 @@ Available commands:
                     if result.get("step_results"):
                         print("\nStep Results:")
                         for step in result["step_results"]:
-                            print(
-                                f"  {step['step_number']}. [{step['status']}] {step['step_text']}"
-                            )
+                            executor_name = step.get("executor")
+                            line = f"  {step['step_number']}. [{step['status']}] {step['step_text']}"
+                            if executor_name:
+                                line += f" ({executor_name})"
+                            print(line)
+
                             if step.get("details"):
                                 print(f"     -> {step['details']}")
 
