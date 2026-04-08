@@ -2,7 +2,13 @@ from pathlib import Path
 from typing import List, Dict
 import re
 
-from app.ollama_client import generate_repo_explanation, generate_file_explanation
+from app.ollama_client import (
+    generate_repo_explanation,
+    generate_file_explanation,
+    generate_api_explanation,
+    generate_plan_lifecycle_explanation,
+    generate_output_flow_explanation,
+)
 
 
 SAFE_TEXT_FILES = [
@@ -146,7 +152,7 @@ def review_api_flow(repo_root: str = ".") -> str:
     if not api_path.exists():
         return "API module not found at app/api.py."
 
-    content = _read_text_file(api_path, max_chars=8000)
+    content = _read_text_file(api_path, max_chars=9000)
 
     findings = []
     findings.append("API module found at app/api.py.")
@@ -158,6 +164,12 @@ def review_api_flow(repo_root: str = ".") -> str:
     for fn in ["create_plan_data", "approve_plan_data", "get_plan_data", "run_plan_data"]:
         if fn in content:
             findings.append(f"Core function detected: {fn}")
+
+    context = "\n".join(findings) + "\n\nAPI FILE PREVIEW:\n" + content[:2500]
+    llm_summary = generate_api_explanation(context)
+
+    if llm_summary:
+        return llm_summary
 
     return " ".join(findings)
 
@@ -179,6 +191,17 @@ def review_output_flow(repo_root: str = ".") -> str:
             findings.append(f"{subdir}/ exists with {count} item(s).")
         else:
             findings.append(f"{subdir}/ is missing.")
+
+    context = (
+        "Output/storage flow context:\n"
+        + "\n".join(findings)
+        + "\n\nThis system writes plans, outputs, and logs under the data/ directory."
+    )
+
+    llm_summary = generate_output_flow_explanation(context)
+
+    if llm_summary:
+        return llm_summary
 
     return " ".join(findings)
 
@@ -207,6 +230,12 @@ def review_plan_lifecycle(repo_root: str = ".") -> str:
         findings.append("Log persistence helper detected.")
     if "_output_txt_path" in content:
         findings.append("Output file writing path detected.")
+
+    context = "\n".join(findings) + "\n\nPLAN LIFECYCLE FILE PREVIEW:\n" + content[:3000]
+    llm_summary = generate_plan_lifecycle_explanation(context)
+
+    if llm_summary:
+        return llm_summary
 
     return " ".join(findings)
 

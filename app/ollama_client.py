@@ -18,24 +18,60 @@ def _extract_json_object(text: str):
 
 def generate_plan_steps(goal: str, model: str = DEFAULT_MODEL):
     prompt = f"""
-You are planning a safe, approval-gated execution plan for a local orchestration system called TALOS.
+You are generating execution steps for TALOS, a local orchestration system.
 
 User goal:
 {goal}
 
-Context:
-- This is an existing local Python repository
-- The system is already cloned and running locally
-- The project contains folders like app/, data/, docs/, scripts/
-- TALOS is an early alpha system focused on:
-  - CLI interaction
-  - API endpoints
-  - plan → approval → execution flow
-  - writing outputs to disk
+CRITICAL CONTEXT:
+- This is an EXISTING local Python repository
+- DO NOT suggest cloning, installing dependencies, creating files, or setting up environments
+- The system already exists and should be INSPECTED, EXPLAINED, and ANALYZED
+- TALOS uses approval-gated execution and writes outputs, plans, and logs to disk
 
-Your job is to generate steps to UNDERSTAND and EXPLAIN the system, not to modify or rebuild it.
+AVAILABLE EXECUTION CAPABILITIES:
+- review repository structure
+- analyze CLI flow in app/main.py
+- analyze API routes and endpoint behavior in app/api.py
+- analyze plan lifecycle in app/api.py
+- analyze output/log/data flow in data/
+- inspect docs/ folder
+- summarize specific files such as app/main.py, app/api.py, app/ollama_client.py, README.md
 
-Return only valid JSON in this format:
+YOUR JOB:
+Break the user's goal into 3 to 6 concrete analysis steps that TALOS can execute.
+
+IMPORTANT:
+- Steps must be SPECIFIC and ACTIONABLE
+- Steps should align with the execution capabilities above
+- Prefer direct references to real repo locations like:
+  - app/main.py
+  - app/api.py
+  - app/ollama_client.py
+  - data/
+  - docs/
+- Use wording that naturally maps to existing executors
+
+STRICTLY DO NOT:
+- write generic steps like:
+  - "Analyze the request"
+  - "Break the goal into steps"
+  - "Prepare for approval-gated execution"
+- suggest cloning the repo
+- suggest installing packages
+- suggest creating files
+- suggest unrelated setup work
+- assume databases, external services, or missing infrastructure unless explicitly asked
+
+GOOD STEP EXAMPLES:
+- "Review API routes defined in app/api.py"
+- "Analyze CLI command flow in app/main.py"
+- "Explain the plan lifecycle implemented in app/api.py"
+- "Describe how outputs, plans, and logs are written under data/"
+- "Inspect the docs folder and summarize available documentation"
+- "Summarize app/main.py and explain why it matters to contributors"
+
+Return ONLY valid JSON in this exact format:
 {{
   "steps": [
     "Step 1",
@@ -43,13 +79,6 @@ Return only valid JSON in this format:
     "Step 3"
   ]
 }}
-
-Rules:
-- Return 3 to 6 steps
-- Focus on understanding, reviewing, and explaining the system
-- Do NOT suggest commands, setup steps, or file creation
-- No markdown fences
-- No explanation outside JSON
 """
 
     try:
@@ -69,8 +98,10 @@ Rules:
 
         if isinstance(steps, list) and steps:
             cleaned = [str(step).strip() for step in steps if str(step).strip()]
-            if cleaned:
+            if 3 <= len(cleaned) <= 6:
                 return cleaned
+            if cleaned:
+                return cleaned[:6]
 
     except Exception as e:
         print(f"[OLLAMA PLAN ERROR] {type(e).__name__}: {e}")
@@ -151,5 +182,113 @@ File content:
 
     except Exception as e:
         print(f"[OLLAMA FILE SUMMARY ERROR] {type(e).__name__}: {e}")
+
+    return ""
+
+
+def generate_api_explanation(context: str, model: str = DEFAULT_MODEL) -> str:
+    prompt = f"""
+You are explaining the API flow of an early-alpha local orchestration system called TALOS.
+
+Your job:
+- Explain the API clearly for a new contributor
+- Stay grounded ONLY in the provided context
+- Do NOT invent routes, request types, or systems not present
+
+Return plain text only.
+
+Structure:
+1. One short overview paragraph
+2. A short bullet list of the most important routes or responsibilities
+3. One short sentence explaining why this API layer matters
+
+API context:
+{context}
+"""
+
+    try:
+        response = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        content_out = response["message"]["content"].strip()
+        if content_out:
+            return content_out
+
+    except Exception as e:
+        print(f"[OLLAMA API SUMMARY ERROR] {type(e).__name__}: {e}")
+
+    return ""
+
+
+def generate_plan_lifecycle_explanation(context: str, model: str = DEFAULT_MODEL) -> str:
+    prompt = f"""
+You are explaining the plan lifecycle of an early-alpha local orchestration system called TALOS.
+
+Your job:
+- Explain how plans move through the system
+- Stay grounded ONLY in the provided context
+- Do NOT invent lifecycle stages that are not present
+
+Return plain text only.
+
+Structure:
+1. One short overview paragraph
+2. A short bullet list of the most important lifecycle stages
+3. One short sentence explaining why this lifecycle matters
+
+Plan lifecycle context:
+{context}
+"""
+
+    try:
+        response = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        content_out = response["message"]["content"].strip()
+        if content_out:
+            return content_out
+
+    except Exception as e:
+        print(f"[OLLAMA PLAN LIFECYCLE ERROR] {type(e).__name__}: {e}")
+
+    return ""
+
+
+def generate_output_flow_explanation(context: str, model: str = DEFAULT_MODEL) -> str:
+    prompt = f"""
+You are explaining the output and storage flow of an early-alpha local orchestration system called TALOS.
+
+Your job:
+- Explain how data is written and stored
+- Stay grounded ONLY in the provided context
+- Do NOT invent storage layers or systems not present
+
+Return plain text only.
+
+Structure:
+1. One short overview paragraph
+2. A short bullet list of the most important storage directories or artifacts
+3. One short sentence explaining why this storage flow matters
+
+Output/storage context:
+{context}
+"""
+
+    try:
+        response = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        content_out = response["message"]["content"].strip()
+        if content_out:
+            return content_out
+
+    except Exception as e:
+        print(f"[OLLAMA OUTPUT FLOW ERROR] {type(e).__name__}: {e}")
 
     return ""
