@@ -1,9 +1,12 @@
 from pathlib import Path
 from typing import List
 
+from app.ollama_client import generate_repo_explanation
+
 
 SAFE_TEXT_FILES = [
     "README.md",
+    "Readme.md",
     "app/main.py",
     "app/api.py",
     "app/ollama_client.py",
@@ -20,16 +23,36 @@ def _read_text_file(path: Path, max_chars: int = 4000) -> str:
 def _list_top_level(repo_root: Path) -> List[str]:
     items = []
     for item in sorted(repo_root.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-        if item.name.startswith(".git"):
+        if item.name.startswith("."):
             continue
         items.append(item.name + ("/" if item.is_dir() else ""))
     return items
 
 
-def generate_repo_summary(repo_root: str = ".") -> str:
-    root = Path(repo_root).resolve()
+def _build_repo_context(repo_root: Path) -> str:
+    top_level = _list_top_level(repo_root)
 
-    top_level = _list_top_level(root)
+    parts = []
+    parts.append("TOP-LEVEL STRUCTURE:")
+    for item in top_level:
+        parts.append(f"- {item}")
+    parts.append("")
+
+    parts.append("KEY FILE PREVIEWS:")
+    for rel_path in SAFE_TEXT_FILES:
+        file_path = repo_root / rel_path
+        if file_path.exists() and file_path.is_file():
+            content = _read_text_file(file_path, max_chars=2000).strip()
+            if content:
+                parts.append(f"\nFILE: {rel_path}\n")
+                parts.append(content[:1200])
+                parts.append("\n")
+
+    return "\n".join(parts)
+
+
+def _generate_static_summary(repo_root: Path) -> str:
+    top_level = _list_top_level(repo_root)
 
     sections = []
     sections.append("# TALOS Repository Summary\n")
@@ -41,7 +64,7 @@ def generate_repo_summary(repo_root: str = ".") -> str:
 
     sections.append("## Key file summaries")
     for rel_path in SAFE_TEXT_FILES:
-        file_path = root / rel_path
+        file_path = repo_root / rel_path
         if file_path.exists() and file_path.is_file():
             content = _read_text_file(file_path)
             preview = content[:800].strip()
@@ -63,7 +86,7 @@ def generate_repo_summary(repo_root: str = ".") -> str:
     sections.append("")
     sections.append(
         "A new contributor should start by understanding how `app/main.py` drives the CLI loop, "
-        "how `app/api.py` manages plan creation/approval/execution, and how outputs are written "
+        "how `app/api.py` manages plan creation, approval, and execution, and how outputs are written "
         "under `data/`."
     )
     sections.append("")
@@ -73,3 +96,15 @@ def generate_repo_summary(repo_root: str = ".") -> str:
     )
 
     return "\n".join(sections)
+
+
+def generate_repo_summary(repo_root: str = ".") -> str:
+    root = Path(repo_root).resolve()
+
+    context = _build_repo_context(root)
+    llm_summary = generate_repo_explanation(context)
+
+    if llm_summary:
+        return "# TALOS Repository Summary\n\n" + llm_summary
+
+    return _generate_static_summary(root)

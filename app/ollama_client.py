@@ -4,7 +4,6 @@ import ollama
 
 DEFAULT_MODEL = "llama3.2:3b"
 
-
 FALLBACK_STEPS = [
     "Analyze the request",
     "Break the goal into steps",
@@ -12,13 +11,12 @@ FALLBACK_STEPS = [
 ]
 
 
-def _extract_json_object(text: str) -> str | None:
+def _extract_json_object(text: str):
     match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        return match.group(0)
-    return None
+    return match.group(0) if match else None
 
 
+# 🧠 PLANNER
 def generate_plan_steps(goal: str, model: str = DEFAULT_MODEL):
     prompt = f"""
 You are planning a safe, approval-gated execution plan for a local orchestration system called TALOS.
@@ -50,64 +48,69 @@ Return only valid JSON in this format:
 Rules:
 - Return 3 to 6 steps
 - Focus on understanding, reviewing, and explaining the system
-- Prioritize:
-  - repository structure
-  - CLI behavior
-  - API flow
-  - plan lifecycle (plan → approve → run)
-  - output/log/data flow
-
-STRICTLY DO NOT:
-- suggest cloning the repo
-- suggest installing packages
-- suggest creating new files
-- suggest writing code
-- suggest using git commands
-- suggest using shell tools (tree, ls, pip, etc.)
-- assume missing features like databases or external systems
-
-Steps must describe WHAT to review, not HOW to run commands.
-
-Keep steps short, concrete, and readable.
-
-No markdown fences.
-No explanation outside JSON.
+- Do NOT suggest commands, setup steps, or file creation
+- No markdown fences
+- No explanation outside JSON
 """
 
     try:
         response = ollama.chat(
             model=model,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "user", "content": prompt}],
         )
-
-        print("\n[OLLAMA FULL RESPONSE]")
-        print(response)
-        print()
 
         content = response["message"]["content"].strip()
 
-        print("[OLLAMA MESSAGE CONTENT]")
-        print(content)
-        print()
-
         json_text = _extract_json_object(content)
         if not json_text:
-            print("[OLLAMA ERROR] No JSON object found in model output.")
             return FALLBACK_STEPS
 
         data = json.loads(json_text)
         steps = data.get("steps", [])
 
-        if isinstance(steps, list):
-            cleaned = [str(step).strip() for step in steps if str(step).strip()]
-            if cleaned:
-                return cleaned
-
-        print("[OLLAMA ERROR] JSON parsed but no valid steps list found.")
-        return FALLBACK_STEPS
+        if isinstance(steps, list) and steps:
+            return steps
 
     except Exception as e:
-        print(f"[OLLAMA ERROR] {type(e).__name__}: {e}")
-        return FALLBACK_STEPS
+        print(f"[OLLAMA PLAN ERROR] {type(e).__name__}: {e}")
+
+    return FALLBACK_STEPS
+
+
+# 🧠 EXECUTION SUMMARY (LLM-powered)
+def generate_repo_explanation(context: str, model: str = DEFAULT_MODEL) -> str:
+    prompt = f"""
+You are writing a contributor-facing repository summary for an early-alpha local orchestration system called TALOS.
+
+Your job:
+- Explain the repository clearly for a new contributor
+- Stay grounded ONLY in the provided context
+- Do NOT invent features, files, or systems not present
+
+Return plain text only.
+
+Structure:
+1. Short overview paragraph
+2. Bullet list of key components
+3. Explanation of execution flow
+4. Where a contributor should start
+
+Repository context:
+{context}
+"""
+
+    try:
+        response = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        content = response["message"]["content"].strip()
+
+        if content:
+            return content
+
+    except Exception as e:
+        print(f"[OLLAMA SUMMARY ERROR] {type(e).__name__}: {e}")
+
+    return ""
