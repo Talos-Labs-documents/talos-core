@@ -1,433 +1,382 @@
+from __future__ import annotations
+
+import json
 from pathlib import Path
-from typing import List, Dict
-import re
+from typing import Any, Dict, List
 
 from app.ollama_client import (
-    generate_repo_explanation,
     generate_file_explanation,
-    generate_api_explanation,
-    generate_plan_lifecycle_explanation,
-    generate_output_flow_explanation,
+    generate_repo_explanation,
+    generate_step_execution_plan,
 )
 
 
-SAFE_TEXT_FILES = [
-    "README.md",
-    "Readme.md",
-    "app/main.py",
-    "app/api.py",
-    "app/ollama_client.py",
-]
+DATA_OUTPUT_DIR = Path("data/outputs")
+
+IGNORE_DIRS = {
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".idea",
+    ".vscode",
+    ".tox",
+    ".eggs",
+}
+
+IGNORE_FILE_SUFFIXES = {
+    ".pyc",
+    ".pyo",
+    ".pyd",
+    ".so",
+    ".dll",
+    ".dylib",
+    ".o",
+    ".a",
+    ".class",
+}
+
+PREFERRED_SCAN_SUFFIXES = {
+    ".py",
+    ".md",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".sh",
+    ".env",
+}
 
 
-def _read_text_file(path: Path, max_chars: int = 4000) -> str:
+def ensure_parent_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def safe_read_text(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8")[:max_chars]
-    except Exception:
-        return ""
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="utf-8", errors="replace")
 
 
-def _list_top_level(repo_root: Path) -> List[str]:
-    items = []
-    for item in sorted(repo_root.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-        if item.name.startswith("."):
+def should_ignore_path(path: Path) -> bool:
+    parts = set(path.parts)
+
+    if parts & IGNORE_DIRS:
+        return True
+
+    if path.is_file() and path.suffix.lower() in IGNORE_FILE_SUFFIXES:
+        return True
+
+    return False
+
+
+def should_include_file_in_scan(path: Path) -> bool:
+    if not path.is_file():
+        return True
+
+    if should_ignore_path(path):
+        return False
+
+    # Keep common project files even if they have no suffix
+    name = path.name.lower()
+    if name in {
+        "readme",
+        "license",
+        "dockerfile",
+        "makefile",
+        ".gitignore",
+        ".env",
+        ".env.example",
+        "requirements.txt",
+        "pyproject.toml",
+    }:
+        return True
+
+    if path.suffix.lower() in PREFERRED_SCAN_SUFFIXES:
+        return True
+
+    return False
+
+
+def resolve_path(target: str, repo_root: str = ".") -> Path:
+    target_path = Path(target)
+    if target_path.is_absolute():
+        return target_path
+    return (Path(repo_root) / target_path).resolve()
+
+
+def scan_directory(path: Path) -> str:
+    if not path.exists():
+        return f"Path does not exist: {path}"
+
+    if not path.is_dir():
+        return f"Path is not a directory: {path}"
+
+    lines: List[str] = []
+
+    for p in sorted(path.rglob("*")):
+        if should_ignore_path(p):
             continue
-        items.append(item.name + ("/" if item.is_dir() else ""))
-    return items
 
+        if p.is_file() and not should_include_file_in_scan(p):
+            continue
 
-def _build_repo_context(repo_root: Path) -> str:
-    top_level = _list_top_level(repo_root)
+        try:
+            rel = p.relative_to(path)
+        except ValueError:
+            rel = p
 
-    parts = []
-    parts.append("TOP-LEVEL STRUCTURE:")
-    for item in top_level:
-        parts.append(f"- {item}")
-    parts.append("")
-
-    parts.append("KEY FILE PREVIEWS:")
-    for rel_path in SAFE_TEXT_FILES:
-        file_path = repo_root / rel_path
-        if file_path.exists() and file_path.is_file():
-            content = _read_text_file(file_path, max_chars=2000).strip()
-            if content:
-                parts.append(f"\nFILE: {rel_path}\n")
-                parts.append(content[:1200])
-                parts.append("\n")
-
-    return "\n".join(parts)
-
-
-def _generate_static_summary(repo_root: Path) -> str:
-    top_level = _list_top_level(repo_root)
-
-    sections = []
-    sections.append("# TALOS Repository Summary\n")
-
-    sections.append("## Top-level structure")
-    for item in top_level:
-        sections.append(f"- {item}")
-    sections.append("")
-
-    sections.append("## Key file summaries")
-    for rel_path in SAFE_TEXT_FILES:
-        file_path = repo_root / rel_path
-        if file_path.exists() and file_path.is_file():
-            content = _read_text_file(file_path)
-            preview = content[:800].strip()
-            sections.append(f"### {rel_path}")
-            if preview:
-                sections.append("```")
-                sections.append(preview)
-                sections.append("```")
-            else:
-                sections.append("(File exists but could not be read.)")
-            sections.append("")
-
-    sections.append("## Contributor-facing interpretation")
-    sections.append(
-        "This repository appears to be an early-alpha local orchestration system named TALOS. "
-        "Its current flow centers on a CLI entry point, API-backed planning logic, approval-gated "
-        "execution, and persistent storage of plans, logs, and outputs."
-    )
-    sections.append("")
-    sections.append(
-        "A new contributor should start by understanding how `app/main.py` drives the CLI loop, "
-        "how `app/api.py` manages plan creation, approval, and execution, and how outputs are written "
-        "under `data/`."
-    )
-    sections.append("")
-    sections.append(
-        "The current design emphasizes safety and traceability: TALOS plans first, requires approval, "
-        "then executes bounded actions while leaving artifacts on disk."
-    )
-
-    return "\n".join(sections)
-
-
-def generate_repo_summary(repo_root: str = ".") -> str:
-    root = Path(repo_root).resolve()
-
-    context = _build_repo_context(root)
-    llm_summary = generate_repo_explanation(context)
-
-    if llm_summary:
-        return "# TALOS Repository Summary\n\n" + llm_summary
-
-    return _generate_static_summary(root)
-
-
-def review_repository_structure(repo_root: str = ".") -> str:
-    root = Path(repo_root).resolve()
-    items = _list_top_level(root)
-    return "Top-level repository structure: " + ", ".join(items)
-
-
-def review_cli_flow(repo_root: str = ".") -> str:
-    root = Path(repo_root).resolve()
-    main_path = root / "app" / "main.py"
-
-    if not main_path.exists():
-        return "CLI entry point not found at app/main.py."
-
-    content = _read_text_file(main_path, max_chars=3500)
-
-    findings = []
-    findings.append("CLI entry point found at app/main.py.")
-
-    if 'input("talos> ")' in content or "input('talos> ')" in content:
-        findings.append("Interactive command loop is present.")
-
-    for cmd in ["plantask", "showplan", "approveplan", "rejectplan", "runplan"]:
-        if cmd in content:
-            findings.append(f"Command handler present for '{cmd}'.")
-
-    return " ".join(findings)
-
-
-def review_api_flow(repo_root: str = ".") -> str:
-    root = Path(repo_root).resolve()
-    api_path = root / "app" / "api.py"
-
-    if not api_path.exists():
-        return "API module not found at app/api.py."
-
-    content = _read_text_file(api_path, max_chars=9000)
-
-    findings = []
-    findings.append("API module found at app/api.py.")
-
-    for route in ["/plan", "/approve", "/run", "/health", "/capabilities"]:
-        if route in content:
-            findings.append(f"Route detected: {route}")
-
-    for fn in ["create_plan_data", "approve_plan_data", "get_plan_data", "run_plan_data"]:
-        if fn in content:
-            findings.append(f"Core function detected: {fn}")
-
-    context = "\n".join(findings) + "\n\nAPI FILE PREVIEW:\n" + content[:2500]
-    llm_summary = generate_api_explanation(context)
-
-    if llm_summary:
-        return llm_summary
-
-    return " ".join(findings)
-
-
-def review_output_flow(repo_root: str = ".") -> str:
-    root = Path(repo_root).resolve()
-    data_dir = root / "data"
-    findings = []
-
-    if not data_dir.exists():
-        return "Data directory not found."
-
-    findings.append("Data directory exists.")
-
-    for subdir in ["plans", "outputs", "logs"]:
-        path = data_dir / subdir
-        if path.exists():
-            count = len(list(path.glob("*")))
-            findings.append(f"{subdir}/ exists with {count} item(s).")
+        if p.is_dir():
+            lines.append(f"[DIR]  {rel}")
         else:
-            findings.append(f"{subdir}/ is missing.")
+            lines.append(f"[FILE] {rel}")
 
-    context = (
-        "Output/storage flow context:\n"
-        + "\n".join(findings)
-        + "\n\nThis system writes plans, outputs, and logs under the data/ directory."
-    )
+    if not lines:
+        return f"No relevant files found in: {path}"
 
-    llm_summary = generate_output_flow_explanation(context)
-
-    if llm_summary:
-        return llm_summary
-
-    return " ".join(findings)
+    return "\n".join(lines)
 
 
-def review_plan_lifecycle(repo_root: str = ".") -> str:
-    root = Path(repo_root).resolve()
-    api_path = root / "app" / "api.py"
-
-    if not api_path.exists():
-        return "Could not review plan lifecycle because app/api.py was not found."
-
-    content = _read_text_file(api_path, max_chars=10000)
-
-    findings = []
-    findings.append("Plan lifecycle reviewed in app/api.py.")
-
-    if "def create_plan_data" in content:
-        findings.append("Plan creation function detected.")
-    if "def approve_plan_data" in content:
-        findings.append("Approval function detected.")
-    if "def run_plan_data" in content:
-        findings.append("Execution function detected.")
-    if "_save_plan" in content:
-        findings.append("Plan persistence helper detected.")
-    if "_save_log" in content:
-        findings.append("Log persistence helper detected.")
-    if "_output_txt_path" in content:
-        findings.append("Output file writing path detected.")
-
-    context = "\n".join(findings) + "\n\nPLAN LIFECYCLE FILE PREVIEW:\n" + content[:3000]
-    llm_summary = generate_plan_lifecycle_explanation(context)
-
-    if llm_summary:
-        return llm_summary
-
-    return " ".join(findings)
+def write_output(path: Path, content: str) -> str:
+    ensure_parent_dir(path)
+    path.write_text(content, encoding="utf-8")
+    return f"Wrote output to {path}"
 
 
-def inspect_docs_folder(repo_root: str = ".") -> str:
-    root = Path(repo_root).resolve()
-    docs_dir = root / "docs"
-
-    if not docs_dir.exists():
-        return "docs/ folder not found."
-
-    if not docs_dir.is_dir():
-        return "docs exists but is not a directory."
-
-    doc_files = sorted([p for p in docs_dir.iterdir() if p.is_file()], key=lambda p: p.name.lower())
-
-    if not doc_files:
-        return "docs/ folder exists but currently appears empty."
-
-    findings = [f"docs/ folder contains {len(doc_files)} file(s)."]
-    for file_path in doc_files[:10]:
-        findings.append(f"Detected documentation file: {file_path.name}")
-        preview = _read_text_file(file_path, max_chars=500).strip()
-        if preview:
-            preview_line = preview.replace("\n", " ")[:180]
-            findings.append(f"Preview for {file_path.name}: {preview_line}")
-
-    return " ".join(findings)
-
-
-def summarize_file(rel_path: str, repo_root: str = ".") -> str:
-    root = Path(repo_root).resolve()
-    file_path = root / rel_path
-
-    if not file_path.exists():
-        return f"Requested file not found: {rel_path}"
-
-    if not file_path.is_file():
-        return f"Requested path is not a file: {rel_path}"
-
-    content = _read_text_file(file_path, max_chars=3500)
-    if not content.strip():
-        return f"File exists but could not be read or is empty: {rel_path}"
-
-    llm_summary = generate_file_explanation(rel_path, content[:2500])
-    if llm_summary:
-        return llm_summary
-
-    summary_parts = [f"Reviewed file: {rel_path}."]
-    if "def " in content:
-        summary_parts.append("Function definitions are present.")
-    if "class " in content:
-        summary_parts.append("Class definitions are present.")
-    if "@app." in content or "FastAPI" in content:
-        summary_parts.append("API-related code is present.")
-    if "input(" in content:
-        summary_parts.append("Interactive CLI input handling is present.")
-    if "write_text(" in content or "read_text(" in content:
-        summary_parts.append("File persistence operations are present.")
-
-    preview = content[:350].replace("\n", " ")
-    summary_parts.append(f"Preview: {preview}")
-
-    return " ".join(summary_parts)
-
-
-def explain_api_routes(repo_root: str = ".") -> str:
-    root = Path(repo_root).resolve()
-    api_path = root / "app" / "api.py"
-
-    if not api_path.exists():
-        return "Cannot explain API routes because app/api.py was not found."
-
-    content = _read_text_file(api_path, max_chars=12000)
-
-    route_matches = re.findall(r'@app\.(get|post)\("([^"]+)"\)', content)
-    if not route_matches:
-        return "No API route decorators were detected in app/api.py."
-
-    findings = ["API route definitions reviewed."]
-    for method, route in route_matches:
-        findings.append(f"{method.upper()} {route}")
-
-    return " ".join(findings)
-
-
-def review_generic_context(step_text: str, repo_root: str = ".") -> str:
-    return f"Reviewed repository context for step: {step_text}"
-
-
-def _extract_file_reference(step_text: str, repo_root: str = ".") -> str | None:
-    root = Path(repo_root).resolve()
-
-    patterns = [
-        r"\b[a-zA-Z0-9_/\-]+\.(?:py|md|txt|json|yaml|yml)\b",
+def find_readme(repo_path: Path) -> str:
+    readme_candidates = [
+        repo_path / "README.md",
+        repo_path / "readme.md",
+        repo_path / "README.txt",
+        repo_path / "README",
     ]
 
-    for pattern in patterns:
-        match = re.search(pattern, step_text)
-        if match:
-            candidate = match.group(0)
+    for candidate in readme_candidates:
+        if candidate.exists() and candidate.is_file():
+            return safe_read_text(candidate)
 
-            if (root / candidate).exists():
-                return candidate
-
-            app_candidate = root / "app" / candidate
-            if app_candidate.exists():
-                return f"app/{candidate}"
-
-            for p in root.rglob(candidate):
-                return str(p.relative_to(root))
-
-    return None
+    return ""
 
 
-def execute_step(step_text: str, goal: str, repo_root: str = ".") -> Dict[str, str]:
-    text = step_text.lower()
+def summarize_repository(repo_path: Path) -> str:
+    listing = scan_directory(repo_path)
+    readme_text = find_readme(repo_path)
 
-    try:
-        file_ref = _extract_file_reference(step_text, repo_root)
-        if file_ref:
-            return {
-                "status": "completed",
-                "details": summarize_file(file_ref, repo_root),
-                "executor": "summarize_file",
-            }
+    repo_text = f"""
+Repository path: {repo_path}
 
-        if "api routes" in text or "routes" in text or "endpoints" in text:
-            return {
-                "status": "completed",
-                "details": explain_api_routes(repo_root),
-                "executor": "explain_api_routes",
-            }
+Directory listing:
+{listing}
 
-        if "plan lifecycle" in text or "approval" in text or "persistence" in text or "execution flow" in text:
-            return {
-                "status": "completed",
-                "details": review_plan_lifecycle(repo_root),
-                "executor": "review_plan_lifecycle",
-            }
+README:
+{readme_text}
+""".strip()
 
-        if "cli" in text or "command loop" in text or "interactive" in text:
-            return {
-                "status": "completed",
-                "details": review_cli_flow(repo_root),
-                "executor": "review_cli_flow",
-            }
+    return generate_repo_explanation(repo_text)
 
-        if "api" in text or "request/response" in text:
-            return {
-                "status": "completed",
-                "details": review_api_flow(repo_root),
-                "executor": "review_api_flow",
-            }
 
-        if "output" in text or "log" in text or "data flow" in text or "written to disk" in text:
-            return {
-                "status": "completed",
-                "details": review_output_flow(repo_root),
-                "executor": "review_output_flow",
-            }
+def summarize_file(file_path: Path) -> str:
+    if not file_path.exists():
+        return f"File not found: {file_path}"
 
-        if "structure" in text or "folder" in text or "directory" in text:
-            return {
-                "status": "completed",
-                "details": review_repository_structure(repo_root),
-                "executor": "review_repository_structure",
-            }
+    if not file_path.is_file():
+        return f"Path is not a file: {file_path}"
 
-        if "documentation" in text or "docs" in text:
-            return {
-                "status": "completed",
-                "details": inspect_docs_folder(repo_root),
-                "executor": "inspect_docs_folder",
-            }
+    contents = safe_read_text(file_path)
+    return generate_file_explanation(str(file_path), contents)
 
-        if any(word in goal.lower() for word in ["repository", "repo", "summarize", "contributor", "review"]):
-            return {
-                "status": "completed",
-                "details": review_generic_context(step_text, repo_root),
-                "executor": "review_generic_context",
-            }
 
+def normalize_step(step: Any) -> Dict[str, Any]:
+    if isinstance(step, dict):
+        return step
+
+    if isinstance(step, str):
+        return {"description": step}
+
+    return {"description": str(step)}
+
+
+def infer_target_from_step(step: Dict[str, Any]) -> str:
+    for key in ("target", "path", "file_path", "repo_path"):
+        value = step.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    description = str(step.get("description", "")).strip()
+    return description or "."
+
+
+def fallback_execution_plan(step: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Simple keyword fallback in case the router returns junk or noop.
+    """
+    description = str(step.get("description", "")).lower()
+    target = infer_target_from_step(step)
+    step_type = str(step.get("type", "")).lower()
+    output_path = step.get("output_path")
+
+    text = f"{description} {step_type}".strip()
+
+    if "scan" in text or "directory" in text or "structure" in text:
         return {
-            "status": "completed",
-            "details": f"Fallback execution completed for step: {step_text}",
-            "executor": "fallback",
+            "action": "scan_directory",
+            "reason": "Fallback rule matched scan/directory language.",
+            "target": target,
+            "output_path": output_path,
+            "content": "",
         }
+
+    if "summarize repo" in text or "summarize the repository" in text or "repository" in text:
+        return {
+            "action": "summarize_repo",
+            "reason": "Fallback rule matched repository summary language.",
+            "target": target,
+            "output_path": output_path,
+            "content": "",
+        }
+
+    if "read file" in text or step_type == "read_file":
+        return {
+            "action": "read_file",
+            "reason": "Fallback rule matched file-read language.",
+            "target": target,
+            "output_path": output_path,
+            "content": "",
+        }
+
+    if "summarize file" in text or "explain file" in text or step_type == "summarize_file":
+        return {
+            "action": "summarize_file",
+            "reason": "Fallback rule matched file summary language.",
+            "target": target,
+            "output_path": output_path,
+            "content": "",
+        }
+
+    if "write" in text or "save" in text or step_type == "write_output":
+        return {
+            "action": "write_output",
+            "reason": "Fallback rule matched write/save language.",
+            "target": target,
+            "output_path": output_path or str(DATA_OUTPUT_DIR / "summary.txt"),
+            "content": "",
+        }
+
+    return {
+        "action": "noop",
+        "reason": "No fallback rule matched.",
+        "target": target,
+        "output_path": output_path,
+        "content": "",
+    }
+
+
+def choose_execution_plan(step: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Use LLM router first, then fall back to deterministic rules if needed.
+    """
+    try:
+        llm_plan = generate_step_execution_plan(step)
+
+        if not isinstance(llm_plan, dict):
+            return fallback_execution_plan(step)
+
+        action = llm_plan.get("action", "noop")
+        if not isinstance(action, str) or not action.strip():
+            return fallback_execution_plan(step)
+
+        # If router gives noop for a clearly structured step, fallback may be better
+        if action == "noop":
+            fb = fallback_execution_plan(step)
+            if fb["action"] != "noop":
+                return fb
+
+        llm_plan.setdefault("reason", "No reason provided.")
+        llm_plan.setdefault("target", infer_target_from_step(step))
+        llm_plan.setdefault("output_path", step.get("output_path"))
+        llm_plan.setdefault("content", "")
+        return llm_plan
 
     except Exception as e:
-        return {
-            "status": "failed",
-            "details": f"Executor error: {e}",
-            "executor": "error",
-        }
+        fb = fallback_execution_plan(step)
+        fb["reason"] = f"{fb['reason']} Router fallback used after error: {e}"
+        return fb
+
+
+def execute_step(step: Dict[str, Any], repo_root: str = ".") -> Dict[str, Any]:
+    step = normalize_step(step)
+
+    execution_plan = choose_execution_plan(step)
+    action = execution_plan.get("action", "noop")
+    target = execution_plan.get("target") or infer_target_from_step(step)
+    output_path = execution_plan.get("output_path")
+    content = execution_plan.get("content", "")
+
+    result: Dict[str, Any] = {
+        "step": step,
+        "execution_plan": execution_plan,
+        "status": "success",
+        "result": "",
+    }
+
+    try:
+        if action == "scan_directory":
+            resolved_target = resolve_path(target, repo_root)
+            result["result"] = scan_directory(resolved_target)
+
+        elif action == "read_file":
+            resolved_target = resolve_path(target, repo_root)
+            result["result"] = safe_read_text(resolved_target)
+
+        elif action == "summarize_repo":
+            resolved_target = resolve_path(target, repo_root)
+            summary = summarize_repository(resolved_target)
+            result["result"] = summary
+
+            if output_path:
+                resolved_output = resolve_path(output_path, repo_root)
+                write_output(resolved_output, summary)
+
+        elif action == "summarize_file":
+            resolved_target = resolve_path(target, repo_root)
+            summary = summarize_file(resolved_target)
+            result["result"] = summary
+
+            if output_path:
+                resolved_output = resolve_path(output_path, repo_root)
+                write_output(resolved_output, summary)
+
+        elif action == "write_output":
+            final_output = content or f"Step completed:\n{json.dumps(step, indent=2)}"
+            resolved_output = resolve_path(
+                output_path or str(DATA_OUTPUT_DIR / "summary.txt"),
+                repo_root,
+            )
+            result["result"] = write_output(resolved_output, final_output)
+
+        else:
+            result["status"] = "skipped"
+            result["result"] = f"No executable action chosen. Router returned: {action}"
+
+    except Exception as e:
+        result["status"] = "error"
+        result["result"] = str(e)
+
+    return result
+
+
+def generate_repo_summary(repo_path: str = ".") -> str:
+    resolved_repo = Path(repo_path).resolve()
+    summary = summarize_repository(resolved_repo)
+    output_path = DATA_OUTPUT_DIR / "summary.txt"
+    write_output(output_path, summary)
+    return summary

@@ -1,390 +1,212 @@
-from uuid import uuid4
-from pathlib import Path
-import json
-from datetime import datetime
+from __future__ import annotations
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+import uuid
+from typing import Any, Dict, List, Optional
 
+from app.executor import execute_step
 from app.ollama_client import generate_plan_steps
-from app.executor import generate_repo_summary, execute_step
-app = FastAPI(title="TALOS API", version="0.3-alpha")
-
-PLAN_STORE = {}
-
-DATA_DIR = Path("data")
-PLANS_DIR = DATA_DIR / "plans"
-OUTPUTS_DIR = DATA_DIR / "outputs"
-LOGS_DIR = DATA_DIR / "logs"
-
-for directory in [PLANS_DIR, OUTPUTS_DIR, LOGS_DIR]:
-    directory.mkdir(parents=True, exist_ok=True)
 
 
-class GoalRequest(BaseModel):
-    goal: str
+PLANS: Dict[str, Dict[str, Any]] = {}
 
 
-class ApprovalRequest(BaseModel):
-    plan_id: str
-    approved: bool = True
-
-
-class RunRequest(BaseModel):
-    plan_id: str
-
-
-def _timestamp():
-    return datetime.utcnow().isoformat() + "Z"
-
-
-def _plan_json_path(plan_id: str) -> Path:
-    return PLANS_DIR / f"{plan_id}.json"
-
-
-def _output_txt_path(plan_id: str) -> Path:
-    return OUTPUTS_DIR / f"{plan_id}.txt"
-
-
-def _log_json_path(plan_id: str) -> Path:
-    return LOGS_DIR / f"{plan_id}.json"
-
-
-def _save_plan(plan: dict):
-    _plan_json_path(plan["plan_id"]).write_text(
-        json.dumps(plan, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _save_log(plan_id: str, event: str, payload: dict):
-    log_path = _log_json_path(plan_id)
-
-    existing = []
-    if log_path.exists():
-        try:
-            existing = json.loads(log_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            existing = []
-
-    existing.append(
-        {
-            "timestamp": _timestamp(),
-            "event": event,
-            "payload": payload,
-        }
-    )
-
-    log_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-
-
-def create_plan_data(goal: str):
-    goal = goal.strip()
-
-    if not goal:
+def _normalize_step(step: Any, index: int) -> Dict[str, Any]:
+    if isinstance(step, dict):
         return {
-            "ok": False,
-            "error": "Goal cannot be empty",
+            "id": step.get("id", index),
+            "description": step.get("description", f"Step {index}"),
+            "type": step.get("type", "manual_review"),
+            "target": step.get("target", "."),
+            "output_path": step.get("output_path"),
+            "status": step.get("status", "pending"),
+            "result": step.get("result"),
+            "execution_plan": step.get("execution_plan"),
         }
 
-    plan_id = str(uuid4())
-    plan_steps = generate_plan_steps(goal)
+    return {
+        "id": index,
+        "description": str(step),
+        "type": "manual_review",
+        "target": ".",
+        "output_path": None,
+        "status": "pending",
+        "result": None,
+        "execution_plan": None,
+    }
 
-    fallback_steps = [
-        "Analyze the request",
-        "Break the goal into steps",
-        "Prepare for approval-gated execution",
+
+def _normalize_steps(raw_steps: List[Any]) -> List[Dict[str, Any]]:
+    return [_normalize_step(step, i) for i, step in enumerate(raw_steps, start=1)]
+
+
+def _latest_plan() -> Optional[Dict[str, Any]]:
+    if not PLANS:
+        return None
+    last_plan_id = list(PLANS.keys())[-1]
+    return PLANS[last_plan_id]
+
+
+def _legacy_steps(plan: Dict[str, Any]) -> List[str]:
+    return [
+        step.get("description", f"Step {i}")
+        for i, step in enumerate(plan.get("plan_steps", []), start=1)
     ]
 
-    used_fallback = plan_steps == fallback_steps
 
-    plan_data = {
-    "plan_id": plan_id,
-    "goal": goal,
-    "plan": plan_steps,
-    "source": "fallback" if used_fallback else "ollama",
-    "status": "draft",
-    "approved": False,
-    "result": None,
-    "step_results": [
-        {
-            "step_number": i + 1,
-            "step_text": step,
-            "status": "pending",
-            "details": None,
-        }
-        for i, step in enumerate(plan_steps)
-    ],
-    "created_at": _timestamp(),
-    "updated_at": _timestamp(),
-}
+def _legacy_step_results(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
 
-    PLAN_STORE[plan_id] = plan_data
-    _save_plan(plan_data)
-    _save_log(
-        plan_id,
-        "plan_created",
-        {
-            "goal": goal,
-            "source": plan_data["source"],
-        },
-    )
-
-    return {
-        "ok": True,
-        **plan_data,
-    }
-
-
-def approve_plan_data(plan_id: str, approved: bool):
-    plan = PLAN_STORE.get(plan_id)
-
-    if not plan:
-        plan_path = _plan_json_path(plan_id)
-        if plan_path.exists():
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            PLAN_STORE[plan_id] = plan
-
-    if not plan:
-        return {
-            "ok": False,
-            "error": "Plan not found",
-        }
-
-    if approved:
-        plan["approved"] = True
-        plan["status"] = "approved"
-    else:
-        plan["approved"] = False
-        plan["status"] = "rejected"
-
-    plan["updated_at"] = _timestamp()
-
-    PLAN_STORE[plan_id] = plan
-    _save_plan(plan)
-    _save_log(
-        plan_id,
-        "plan_approval_updated",
-        {
-            "approved": approved,
-            "status": plan["status"],
-        },
-    )
-
-    return {
-        "ok": True,
-        **plan,
-    }
-
-
-def get_plan_data(plan_id: str):
-    plan = PLAN_STORE.get(plan_id)
-
-    if not plan:
-        plan_path = _plan_json_path(plan_id)
-        if plan_path.exists():
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            PLAN_STORE[plan_id] = plan
-
-    if not plan:
-        return {
-            "ok": False,
-            "error": "Plan not found",
-        }
-
-    return {
-        "ok": True,
-        **plan,
-    }
-
-
-def run_plan_data(plan_id: str):
-    plan = PLAN_STORE.get(plan_id)
-
-    if not plan:
-        plan_path = _plan_json_path(plan_id)
-        if plan_path.exists():
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            PLAN_STORE[plan_id] = plan
-
-    if not plan:
-        return {
-            "ok": False,
-            "error": "Plan not found",
-        }
-
-    if not plan.get("approved"):
-        return {
-            "ok": False,
-            "error": "Plan must be approved before running",
-        }
-
-    step_results = plan.get("step_results", [])
-    execution_notes = []
-    execution_mode = "step_routed_execution"
-
-    try:
-        for step_entry in step_results:
-            result = execute_step(step_entry["step_text"], plan["goal"], repo_root=".")
-
-            step_entry["status"] = result["status"]
-            step_entry["details"] = result["details"]
-            step_entry["executor"] = result["executor"]
-
-            execution_notes.append(
-                f"Step {step_entry['step_number']} [{result['executor']}]: {result['details']}"
-            )
-
-        if any(word in plan["goal"].lower() for word in ["repository", "repo", "summarize", "contributor", "review"]):
-            repo_summary = generate_repo_summary(".")
-            result_text = (
-                f"{repo_summary}\n\n"
-                f"## Step Execution Notes\n"
-                + "\n".join(f"- {note}" for note in execution_notes)
-            )
-        else:
-            result_text = (
-                f"TALOS executed plan for goal: {plan['goal']}\n\n"
-                f"Plan source: {plan['source']}\n"
-                f"Execution mode: {execution_mode}\n\n"
-                f"## Step Execution Notes\n"
-                + "\n".join(f"- {note}" for note in execution_notes)
-            )
-
-        plan["status"] = "completed"
-        plan["result"] = result_text
-        plan["step_results"] = step_results
-        plan["updated_at"] = _timestamp()
-
-        _output_txt_path(plan_id).write_text(result_text, encoding="utf-8")
-        PLAN_STORE[plan_id] = plan
-        _save_plan(plan)
-        _save_log(
-            plan_id,
-            "plan_completed",
+    for i, step in enumerate(plan.get("plan_steps", []), start=1):
+        results.append(
             {
-                "status": plan["status"],
-                "source": plan["source"],
-                "execution_mode": execution_mode,
-                "steps_completed": len([s for s in step_results if s["status"] == "completed"]),
-                "output_file": str(_output_txt_path(plan_id)),
-            },
+                "step_number": i,
+                "step_text": step.get("description", f"Step {i}"),
+                "status": step.get("status", "pending"),
+                "result": step.get("result"),
+            }
         )
 
-        return {
-            "ok": True,
-            **plan,
-            "execution_mode": execution_mode,
-            "output_file": str(_output_txt_path(plan_id)),
-            "plan_file": str(_plan_json_path(plan_id)),
-            "log_file": str(_log_json_path(plan_id)),
+    return results
+
+
+def _build_result_summary(plan: Dict[str, Any]) -> str:
+    lines: List[str] = []
+
+    for i, step in enumerate(plan.get("plan_steps", []), start=1):
+        description = step.get("description", f"Step {i}")
+        status = step.get("status", "pending")
+        lines.append(f"{i}. {description} -> {status}")
+
+        step_result = step.get("result")
+        if step_result:
+            cleaned = str(step_result).strip()
+            if cleaned:
+                lines.append(cleaned)
+
+    if not lines:
+        return "No step results available."
+
+    return "\n\n".join(lines)
+
+
+def _wrap_plan(plan: Dict[str, Any], message: Optional[str] = None) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "plan_id": plan["plan_id"],
+        "goal": plan["goal"],
+        "source": plan.get("source", "ollama"),
+        "repo_root": plan.get("repo_root", "."),
+        "steps": _legacy_steps(plan),
+        "approved": plan.get("approved", False),
+        "status": plan.get("status", "draft"),
+        "step_results": _legacy_step_results(plan),
+        "result": _build_result_summary(plan),
+        "plan": plan,
+    }
+
+    if message:
+        payload["message"] = message
+
+    return payload
+
+
+def _wrap_error(message: str) -> Dict[str, Any]:
+    return {
+        "ok": False,
+        "error": message,
+    }
+
+
+def create_plan_data(goal: str, repo_root: str = ".") -> Dict[str, Any]:
+    try:
+        generated_plan = generate_plan_steps(goal)
+        raw_steps = generated_plan.get("steps", [])
+        normalized_steps = _normalize_steps(raw_steps)
+
+        plan_id = str(uuid.uuid4())
+        plan: Dict[str, Any] = {
+            "plan_id": plan_id,
+            "goal": generated_plan.get("goal", goal),
+            "source": "ollama",
+            "repo_root": repo_root,
+            "plan_steps": normalized_steps,
+            "approved": False,
+            "status": "draft",
         }
+
+        PLANS[plan_id] = plan
+        return _wrap_plan(plan)
 
     except Exception as e:
-        plan["status"] = "failed"
-        plan["updated_at"] = _timestamp()
-        PLAN_STORE[plan_id] = plan
-        _save_plan(plan)
-        _save_log(
-            plan_id,
-            "plan_failed",
-            {
-                "error": str(e),
-            },
-        )
-        return {
-            "ok": False,
-            "error": f"Execution failed: {e}",
-        }
-    goal_lower = plan["goal"].lower()
-
-    if any(word in goal_lower for word in ["repository", "repo", "summarize", "contributor", "review"]):
-        result_text = generate_repo_summary(".")
-        execution_mode = "repo_summary"
-    else:
-        result_text = (
-            f"TALOS executed plan for goal: {plan['goal']}\n\n"
-            f"Plan source: {plan['source']}\n\n"
-            f"Steps:\n- " + "\n- ".join(plan["plan"])
-        )
-        execution_mode = "fallback"
-
-    plan["status"] = "completed"
-    plan["result"] = result_text
-    plan["updated_at"] = _timestamp()
-
-    _output_txt_path(plan_id).write_text(result_text, encoding="utf-8")
-    PLAN_STORE[plan_id] = plan
-    _save_plan(plan)
-    _save_log(
-        plan_id,
-        "plan_completed",
-        {
-            "status": plan["status"],
-            "source": plan["source"],
-            "execution_mode": execution_mode,
-            "output_file": str(_output_txt_path(plan_id)),
-        },
-    )
-
-    return {
-        "ok": True,
-        **plan,
-        "execution_mode": execution_mode,
-        "output_file": str(_output_txt_path(plan_id)),
-        "plan_file": str(_plan_json_path(plan_id)),
-        "log_file": str(_log_json_path(plan_id)),
-    }
+        return _wrap_error(f"Failed to create plan: {e}")
 
 
-@app.get("/")
-def root():
-    return {
-        "ok": True,
-        "name": "TALOS API",
-        "version": "0.3-alpha",
-        "status": "online",
-    }
+def get_plan_data(plan_id: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        if plan_id:
+            plan = PLANS.get(plan_id)
+            if not plan:
+                return _wrap_error(f"Plan not found: {plan_id}")
+            return _wrap_plan(plan)
+
+        plan = _latest_plan()
+        if not plan:
+            return _wrap_error("No current plan. Use: plantask <goal>")
+
+        return _wrap_plan(plan)
+
+    except Exception as e:
+        return _wrap_error(f"Failed to get plan: {e}")
 
 
-@app.get("/health")
-def health():
-    return {
-        "ok": True,
-        "status": "healthy",
-    }
+def approve_plan_data(plan_id: Optional[str] = None, approved: bool = True) -> Dict[str, Any]:
+    try:
+        if plan_id:
+            plan = PLANS.get(plan_id)
+        else:
+            plan = _latest_plan()
+
+        if not plan:
+            return _wrap_error("No current plan to approve.")
+
+        plan["approved"] = bool(approved)
+        plan["status"] = "approved" if approved else "draft"
+
+        return _wrap_plan(plan, message=f"Plan {'approved' if approved else 'unapproved'}.")
+
+    except Exception as e:
+        return _wrap_error(f"Failed to approve plan: {e}")
 
 
-@app.get("/capabilities")
-def capabilities():
-    return {
-        "ok": True,
-        "capabilities": [
-            "plan_creation",
-            "approval_gating",
-            "plan_execution",
-            "in_memory_plan_store",
-            "disk_persistence",
-            "ollama_planning",
-        ],
-    }
+def run_plan_data(plan_id: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        if plan_id:
+            plan = PLANS.get(plan_id)
+        else:
+            plan = _latest_plan()
 
+        if not plan:
+            return _wrap_error("No current plan to run.")
 
-@app.post("/plan")
-def create_plan(request: GoalRequest):
-    return create_plan_data(request.goal)
+        if not plan.get("approved", False):
+            return _wrap_error("Plan must be approved before execution.")
 
+        repo_root = plan.get("repo_root", ".")
+        plan["status"] = "running"
 
-@app.get("/plan/{plan_id}")
-def get_plan(plan_id: str):
-    return get_plan_data(plan_id)
+        for step in plan.get("plan_steps", []):
+            step_result = execute_step(step, repo_root=repo_root)
 
+            step["status"] = step_result.get("status", "success")
+            step["result"] = step_result.get("result", "")
+            step["execution_plan"] = step_result.get("execution_plan", {})
 
-@app.post("/approve")
-def approve_plan(request: ApprovalRequest):
-    return approve_plan_data(request.plan_id, request.approved)
+            if step["status"] == "error":
+                plan["status"] = "error"
+                return _wrap_plan(plan, message="Execution stopped on error.")
 
+        plan["status"] = "completed"
+        return _wrap_plan(plan, message="Execution completed.")
 
-@app.post("/run")
-def run_plan(request: RunRequest):
-    return run_plan_data(request.plan_id)
+    except Exception as e:
+        return _wrap_error(f"Execution failed: {e}")

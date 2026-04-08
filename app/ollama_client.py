@@ -1,294 +1,319 @@
+from __future__ import annotations
+
 import json
-import re
-import ollama
+from typing import Any, Dict, Optional
 
-DEFAULT_MODEL = "llama3.2:3b"
-
-FALLBACK_STEPS = [
-    "Analyze the request",
-    "Break the goal into steps",
-    "Prepare for approval-gated execution",
-]
+import requests
 
 
-def _extract_json_object(text: str):
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    return match.group(0) if match else None
+OLLAMA_URL = "http://localhost:11434"
+DEFAULT_MODEL = "llama3"
 
 
-def generate_plan_steps(goal: str, model: str = DEFAULT_MODEL):
+class OllamaError(Exception):
+    """Raised when an Ollama request or response fails."""
+
+
+def _post_generate(
+    prompt: str,
+    model: str = DEFAULT_MODEL,
+    system: Optional[str] = None,
+) -> str:
+    """
+    Send a non-streaming generate request to Ollama and return the raw text response.
+    """
+    payload: Dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+    }
+
+    if system:
+        payload["system"] = system
+
+    try:
+        response = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json=payload,
+            timeout=120,
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise OllamaError(f"Failed to call Ollama generate API: {e}") from e
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        raise OllamaError(f"Ollama returned a non-JSON HTTP response: {response.text}") from e
+
+    text = data.get("response", "")
+    if not isinstance(text, str):
+        raise OllamaError(f"Ollama response missing text field: {data}")
+
+    return text.strip()
+
+
+def _extract_first_json_object(raw: str) -> Dict[str, Any]:
+    """
+    Extract and parse the first balanced JSON object found in a string.
+    Useful when the model wraps valid JSON with extra chatter.
+    """
+    start = raw.find("{")
+    if start == -1:
+        raise OllamaError(f"No JSON object found in model output.\nRaw output:\n{raw}")
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start, len(raw)):
+        char = raw[i]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = raw[start : i + 1]
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError as e:
+                    raise OllamaError(
+                        f"Found a JSON-like block but could not parse it.\nCandidate:\n{candidate}"
+                    ) from e
+
+                if not isinstance(parsed, dict):
+                    raise OllamaError(
+                        f"Expected a JSON object but got: {type(parsed).__name__}\nCandidate:\n{candidate}"
+                    )
+
+                return parsed
+
+    raise OllamaError(f"Could not find a complete balanced JSON object.\nRaw output:\n{raw}")
+
+
+def ask_llm(
+    prompt: str,
+    model: str = DEFAULT_MODEL,
+    system: Optional[str] = None,
+) -> str:
+    """
+    Return raw text from the model.
+    """
+    return _post_generate(prompt=prompt, model=model, system=system)
+
+
+def ask_llm_json(
+    prompt: str,
+    model: str = DEFAULT_MODEL,
+    system: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Return JSON from the model.
+    First tries direct parsing, then falls back to extracting the first JSON object.
+    """
+    raw = _post_generate(prompt=prompt, model=model, system=system)
+
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise OllamaError(
+                f"Expected a JSON object but got: {type(parsed).__name__}\nRaw output:\n{raw}"
+            )
+        return parsed
+    except json.JSONDecodeError:
+        return _extract_first_json_object(raw)
+
+
+def generate_plan_steps(goal: str, model: str = DEFAULT_MODEL) -> Dict[str, Any]:
+    """
+    Ask the model to turn a goal into a small execution plan.
+    Expected return shape:
+    {
+      "goal": "...",
+      "steps": [
+        {
+          "id": 1,
+          "description": "...",
+          "type": "...",
+          "target": ".",
+          "output_path": "optional"
+        }
+      ]
+    }
+    """
+    system = (
+        "You are a planning engine for a local-first agent system. "
+        "Break a user goal into clear executable steps. "
+        "Return only raw JSON. Do not include markdown, explanation, or any text before or after the JSON."
+    )
+
     prompt = f"""
-You are generating execution steps for TALOS, a local orchestration system.
+Create an execution plan for this goal:
 
-User goal:
+Goal:
 {goal}
 
-CRITICAL CONTEXT:
-- This is an EXISTING local Python repository
-- DO NOT suggest cloning, installing dependencies, creating files, or setting up environments
-- The system already exists and should be INSPECTED, EXPLAINED, and ANALYZED
-- TALOS uses approval-gated execution and writes outputs, plans, and logs to disk
+Return JSON only in this format:
 
-AVAILABLE EXECUTION CAPABILITIES:
-- review repository structure
-- analyze CLI flow in app/main.py
-- analyze API routes and endpoint behavior in app/api.py
-- analyze plan lifecycle in app/api.py
-- analyze output/log/data flow in data/
-- inspect docs/ folder
-- summarize specific files such as app/main.py, app/api.py, app/ollama_client.py, README.md
-
-YOUR JOB:
-Break the user's goal into 3 to 6 concrete analysis steps that TALOS can execute.
-
-IMPORTANT:
-- Steps must be SPECIFIC and ACTIONABLE
-- Steps should align with the execution capabilities above
-- Prefer direct references to real repo locations like:
-  - app/main.py
-  - app/api.py
-  - app/ollama_client.py
-  - data/
-  - docs/
-- Use wording that naturally maps to existing executors
-
-STRICTLY DO NOT:
-- write generic steps like:
-  - "Analyze the request"
-  - "Break the goal into steps"
-  - "Prepare for approval-gated execution"
-- suggest cloning the repo
-- suggest installing packages
-- suggest creating files
-- suggest unrelated setup work
-- assume databases, external services, or missing infrastructure unless explicitly asked
-
-GOOD STEP EXAMPLES:
-- "Review API routes defined in app/api.py"
-- "Analyze CLI command flow in app/main.py"
-- "Explain the plan lifecycle implemented in app/api.py"
-- "Describe how outputs, plans, and logs are written under data/"
-- "Inspect the docs folder and summarize available documentation"
-- "Summarize app/main.py and explain why it matters to contributors"
-
-Return ONLY valid JSON in this exact format:
 {{
+  "goal": "{goal}",
   "steps": [
-    "Step 1",
-    "Step 2",
-    "Step 3"
+    {{
+      "id": 1,
+      "description": "short concrete step",
+      "type": "scan_directory | read_file | summarize_repo | summarize_file | write_output | manual_review",
+      "target": ".",
+      "output_path": "optional output path"
+    }}
   ]
 }}
-"""
 
-    try:
-        response = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
+Rules:
+- Keep steps concrete and minimal
+- Prefer executable actions over vague analysis
+- Use "scan_directory" for inspecting a repo or folder
+- Use "read_file" for reading a specific file
+- Use "summarize_repo" for repo or project summaries
+- Use "summarize_file" for explaining one file
+- Use "write_output" for saving final output
+- Use "manual_review" only if absolutely necessary
+- Default target to "." when the repo root is implied
+- Return JSON only
+""".strip()
 
-        content = response["message"]["content"].strip()
-        json_text = _extract_json_object(content)
+    data = ask_llm_json(prompt=prompt, model=model, system=system)
 
-        if not json_text:
-            return FALLBACK_STEPS
+    if "goal" not in data or not isinstance(data["goal"], str):
+        data["goal"] = goal
 
-        data = json.loads(json_text)
-        steps = data.get("steps", [])
+    if "steps" not in data or not isinstance(data["steps"], list):
+        data["steps"] = []
 
-        if isinstance(steps, list) and steps:
-            cleaned = [str(step).strip() for step in steps if str(step).strip()]
-            if 3 <= len(cleaned) <= 6:
-                return cleaned
-            if cleaned:
-                return cleaned[:6]
-
-    except Exception as e:
-        print(f"[OLLAMA PLAN ERROR] {type(e).__name__}: {e}")
-
-    return FALLBACK_STEPS
+    return data
 
 
-def generate_repo_explanation(context: str, model: str = DEFAULT_MODEL) -> str:
+def generate_repo_explanation(repo_text: str, model: str = DEFAULT_MODEL) -> str:
+    """
+    Generate a practical summary of a repository from listing + README/context text.
+    """
+    system = (
+        "You are a precise software analyst. "
+        "Explain repositories in a clean, practical, engineering-focused way."
+    )
+
     prompt = f"""
-You are writing a contributor-facing repository summary for an early-alpha local orchestration system called TALOS.
+Analyze the following repository information and explain:
 
-Your job:
-- Explain the repository clearly for a new contributor
-- Stay grounded ONLY in the provided context
-- Do NOT invent features, files, or systems not present
+1. What this project appears to do
+2. Its likely architecture
+3. Key components or modules
+4. What a developer should look at first
+5. Any obvious gaps, risks, or next steps
 
-Return plain text only.
+Repository information:
+{repo_text}
+""".strip()
 
-Structure:
-1. Short overview paragraph
-2. Bullet list of key components
-3. Explanation of execution flow
-4. Where a contributor should start
-
-Repository context:
-{context}
-"""
-
-    try:
-        response = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        content = response["message"]["content"].strip()
-        if content:
-            return content
-
-    except Exception as e:
-        print(f"[OLLAMA REPO SUMMARY ERROR] {type(e).__name__}: {e}")
-
-    return ""
+    return ask_llm(prompt=prompt, model=model, system=system)
 
 
-def generate_file_explanation(file_path: str, content: str, model: str = DEFAULT_MODEL) -> str:
+def generate_file_explanation(
+    file_path: str,
+    file_contents: str,
+    model: str = DEFAULT_MODEL,
+) -> str:
+    """
+    Generate a practical explanation of a single source file.
+    """
+    system = (
+        "You are a senior software engineer explaining source files. "
+        "Be direct, structured, and useful."
+    )
+
     prompt = f"""
-You are explaining a file inside an early-alpha local orchestration system called TALOS.
-
-Your job:
-- Explain what this file appears to do
-- Stay grounded ONLY in the provided file content
-- Do NOT invent functionality that is not visible in the file
-- Keep the explanation concise and contributor-friendly
-
-Return plain text only.
-
-Structure:
-1. One short overview paragraph
-2. A short bullet list of the most important responsibilities in this file
-3. One short sentence telling a contributor why this file matters
+Explain this file for a developer.
 
 File path:
 {file_path}
 
-File content:
-{content}
-"""
+File contents:
+{file_contents}
 
-    try:
-        response = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
+Provide:
+1. Purpose of the file
+2. Important functions or classes
+3. Inputs and outputs
+4. Risks or issues
+5. Suggested improvements
+""".strip()
 
-        content_out = response["message"]["content"].strip()
-        if content_out:
-            return content_out
-
-    except Exception as e:
-        print(f"[OLLAMA FILE SUMMARY ERROR] {type(e).__name__}: {e}")
-
-    return ""
+    return ask_llm(prompt=prompt, model=model, system=system)
 
 
-def generate_api_explanation(context: str, model: str = DEFAULT_MODEL) -> str:
+def generate_step_execution_plan(
+    step: Dict[str, Any],
+    model: str = DEFAULT_MODEL,
+) -> Dict[str, Any]:
+    """
+    Route one step to a concrete executor action.
+    Expected return shape:
+    {
+      "action": "scan_directory" | "read_file" | "summarize_repo" | "summarize_file" | "write_output" | "noop",
+      "reason": "short explanation",
+      "target": "optional path",
+      "output_path": "optional output path",
+      "content": "optional text content"
+    }
+    """
+    system = (
+        "You are an execution router for a local-first agent system. "
+        "Return only raw JSON. Do not include markdown, explanation, or any text before or after the JSON."
+    )
+
     prompt = f"""
-You are explaining the API flow of an early-alpha local orchestration system called TALOS.
+You are given one execution step from a plan.
 
-Your job:
-- Explain the API clearly for a new contributor
-- Stay grounded ONLY in the provided context
-- Do NOT invent routes, request types, or systems not present
+Step:
+{json.dumps(step, indent=2)}
 
-Return plain text only.
+Return a JSON object with this exact shape:
 
-Structure:
-1. One short overview paragraph
-2. A short bullet list of the most important routes or responsibilities
-3. One short sentence explaining why this API layer matters
+{{
+  "action": "scan_directory | read_file | summarize_repo | summarize_file | write_output | noop",
+  "reason": "short explanation",
+  "target": "optional path",
+  "output_path": "optional output file path",
+  "content": "optional text content to write"
+}}
 
-API context:
-{context}
-"""
+Rules:
+- If the step is about scanning a repo or folder, use "scan_directory"
+- If the step is about reading a file, use "read_file"
+- If the step is about summarizing a repo, use "summarize_repo"
+- If the step is about explaining or summarizing a file, use "summarize_file"
+- If the step is about saving final output, use "write_output"
+- If unclear, use "noop"
+- Return JSON only
+""".strip()
 
-    try:
-        response = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
+    data = ask_llm_json(prompt=prompt, model=model, system=system)
 
-        content_out = response["message"]["content"].strip()
-        if content_out:
-            return content_out
+    if "action" not in data or not isinstance(data["action"], str):
+        data["action"] = "noop"
 
-    except Exception as e:
-        print(f"[OLLAMA API SUMMARY ERROR] {type(e).__name__}: {e}")
+    if "reason" not in data or not isinstance(data["reason"], str):
+        data["reason"] = "No reason provided by model."
 
-    return ""
-
-
-def generate_plan_lifecycle_explanation(context: str, model: str = DEFAULT_MODEL) -> str:
-    prompt = f"""
-You are explaining the plan lifecycle of an early-alpha local orchestration system called TALOS.
-
-Your job:
-- Explain how plans move through the system
-- Stay grounded ONLY in the provided context
-- Do NOT invent lifecycle stages that are not present
-
-Return plain text only.
-
-Structure:
-1. One short overview paragraph
-2. A short bullet list of the most important lifecycle stages
-3. One short sentence explaining why this lifecycle matters
-
-Plan lifecycle context:
-{context}
-"""
-
-    try:
-        response = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        content_out = response["message"]["content"].strip()
-        if content_out:
-            return content_out
-
-    except Exception as e:
-        print(f"[OLLAMA PLAN LIFECYCLE ERROR] {type(e).__name__}: {e}")
-
-    return ""
-
-
-def generate_output_flow_explanation(context: str, model: str = DEFAULT_MODEL) -> str:
-    prompt = f"""
-You are explaining the output and storage flow of an early-alpha local orchestration system called TALOS.
-
-Your job:
-- Explain how data is written and stored
-- Stay grounded ONLY in the provided context
-- Do NOT invent storage layers or systems not present
-
-Return plain text only.
-
-Structure:
-1. One short overview paragraph
-2. A short bullet list of the most important storage directories or artifacts
-3. One short sentence explaining why this storage flow matters
-
-Output/storage context:
-{context}
-"""
-
-    try:
-        response = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        content_out = response["message"]["content"].strip()
-        if content_out:
-            return content_out
-
-    except Exception as e:
-        print(f"[OLLAMA OUTPUT FLOW ERROR] {type(e).__name__}: {e}")
-
-    return ""
+    return data
