@@ -34,7 +34,70 @@ Instead of asking one model to do everything, TALOS coordinates specialized comp
 
 ## What TALOS Is
 
-TALOS is not another model. It is the runtime layer that coordinates intelligent components into a governed system. Its goal is to make AI workflows more reliable, modular, transparent, and controllable.
+## Architecture Overview
+
+TALOS is structured as a layered runtime that separates planning, execution, memory, and tooling into distinct components. This design allows AI systems to remain modular, observable, and governable.
+
+### Runtime Layers
+
+```text
++---------------------------------------------------+
+| User / API / CLI / UI                             |
++---------------------------------------------------+
+| TALOS Orchestration Runtime                       |
+|  - Planner                                        |
+|  - Approval & Policy Engine                       |
+|  - Executor                                       |
+|  - Router                                         |
+|  - Memory Manager                                 |
++---------------------------------------------------+
+| Model & Tool Layer                                |
+|  - Local & Remote Models                          |
+|  - Tools & Plugins                                |
+|  - Memory Stores (Vector, Graph, Session)         |
++---------------------------------------------------+
+| Operating System & Hardware                       |
+|  - Process / Memory / Filesystem / Network / GPU  |
++---------------------------------------------------+
+How a Request Flows Through TALOS
+A goal is submitted through the CLI, API, or UI.
+The Planner generates a structured plan with ordered steps and dependencies.
+Policies and approvals are evaluated before any action is executed.
+The Executor runs steps one-by-one, invoking models or tools as needed.
+Memory is retrieved or updated at the appropriate layer.
+Results and logs are returned for inspection, debugging, or continuation.
+
+This separation ensures that models do not execute blindly, tools do not operate without permission, and every step remains auditable.
+
+
+---
+
+## 🎯 Why this matters
+
+Adding this section does three important things:
+
+- It turns TALOS from an abstract idea into a **visual system**
+- It shows readers this is a **runtime**, not just a model
+- It prepares developers for how the system is actually organized
+
+---
+
+## 🧭 Where to go next
+
+Once you paste this, your README will have a strong top section:
+
+1. What TALOS is  
+2. Why it exists  
+3. How it works conceptually  
+4. What it looks like architecturally  
+
+Next, we can:
+
+- add a **Quick Start / Install** section  
+- add a **Project Status & Roadmap** section  
+- or write a **Contributing section**  
+
+Just tell me what you want next.
 
 ## Installation
 
