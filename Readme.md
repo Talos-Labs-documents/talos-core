@@ -38,6 +38,41 @@ Instead of asking one model to do everything, TALOS coordinates specialized comp
 
 TALOS is structured as a layered runtime that separates planning, execution, memory, and tooling into distinct components. This design allows AI systems to remain modular, observable, and governable.
 
+## Quick Start
+
+### Prerequisites
+- Python 3.10+
+- Git
+- Optional: Ollama for local model support
+
+### Setup
+
+```bash
+git clone https://github.com/Talos-Labs-documents/talos-core.git
+cd talos-core
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -r requirements.txt
+
+Run TALOS
+
+python -m app.main
+
+You should now be in the TALOS CLI. Type:
+
+help
+
+to view available commands.
+
+## Repository Structure
+
+- `app/` — Core runtime (planner, executor, router, policies)
+- `data/` — Plans, logs, and outputs
+- `demo-fastapi-service/` — Example API service
+- `demo-file-automation/` — Example automation workflows
+
 ### Runtime Layers
 
 ```text
@@ -68,9 +103,18 @@ Memory is retrieved or updated at the appropriate layer.
 Results and logs are returned for inspection, debugging, or continuation.
 
 This separation ensures that models do not execute blindly, tools do not operate without permission, and every step remains auditable.
-
-
 ---
+
+## Current Status
+
+TALOS is currently in **Public Alpha**. The core runtime is functional, including:
+
+- Structured planning and execution
+- Policy-based approval gates
+- Modular tool execution
+- Persistent logging and outputs
+
+Expect breaking changes and rapid iteration.
 
 ## 🎯 Why this matters
 
