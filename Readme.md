@@ -1,13 +1,40 @@
-- Approval-gated execution
-- Persistent storage (plans, logs, outputs)
-- FastAPI backend (ready for expansion)
+# TALOS
 
----
-# TALOS 0.3 Public Alpha
+**TALOS is an orchestration runtime for AI systems.**
 
-TALOS is a local-first orchestration layer for approval-gated AI execution.
+Instead of forcing one model to plan, act, remember, and use tools all at once, TALOS coordinates models, tools, memory, and execution through a structured runtime with governance, observability, and human oversight.
 
-It turns goals into structured plans, requires user approval before execution, and writes persistent outputs, plans, and logs to disk.
+TALOS turns monolithic AI agent loops into modular, auditable systems.
+
+## Why TALOS Exists
+
+Most AI systems today rely on a single model trying to plan, execute, use tools, and manage memory in one loop. That works for simple tasks, but it often leads to brittle behavior, poor observability, weak control boundaries, and limited modularity.
+
+TALOS takes a different approach: orchestration is treated as a first-class runtime concern.
+
+## Mental Model
+
+TALOS treats AI like an orchestra:
+
+- **Models** are musicians  
+- **Tools** are instruments  
+- **Plans** are sheet music  
+- **The orchestrator** is the conductor  
+
+Instead of asking one model to do everything, TALOS coordinates specialized components under explicit rules and observable execution.
+
+## Core Capabilities
+
+- Structured planning before execution  
+- Approval-gated and policy-aware execution  
+- Dynamic routing across models and tools  
+- Layered memory for continuity and retrieval  
+- Observable state transitions and auditability  
+- Modular architecture built for extension  
+
+## What TALOS Is
+
+TALOS is not another model. It is the runtime layer that coordinates intelligent components into a governed system. Its goal is to make AI workflows more reliable, modular, transparent, and controllable.
 
 ## Installation
 
